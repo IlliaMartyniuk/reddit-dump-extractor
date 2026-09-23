@@ -5,3 +5,8 @@ venv
 data/
 *.zst
 *.csv
+role.local.txt
+*.log
+pipeline_state.json
+__pycache__/
+.vscode/
