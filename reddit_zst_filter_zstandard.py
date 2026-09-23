@@ -41,6 +41,12 @@ def process_file_python(
     try:
         for line in file_reader.yield_lines(file_path):
             try:
+                if not regex and not any(sub in line.lower() for sub in values):
+                    lines_processed += 1
+                    if lines_processed % config.get('processing', 'progress_log_interval') == 0:
+                        log.info(f"{os.path.basename(file_path)}: {lines_processed:,} lines scanned...")
+                    continue
+                
                 obj = json_loads(line)
                 matched = False
                 observed = obj[field].lower()

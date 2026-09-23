@@ -4,6 +4,9 @@ import time
 import json
 import shutil
 import logging
+import sys
+import concurrent.futures
+import threading
 from pathlib import Path
 
 # ================== CONFIG ==================
@@ -24,10 +27,8 @@ STATE_FILE = BASE_DIR / "pipeline_state.json"
 LOG_FILE = BASE_DIR / "pipeline.log"
 
 SUBREDDITS = (
-    "cscareerquestions,webdev,ITCareerQuestions,learnprogramming,DataScience,"
-    "jobs,careerguidance,recruitinghell,resumes,copywriting,graphic_design,"
-    "freelance,translation,Journalism,ArtistLounge,ChatGPT,OpenAI,Claude,"
-    "Anthropic,artificial,singularity,Futurology,technology"
+    "cscareerquestions,jobs,recruitinghell,copywriting,graphic_design,"
+    "ArtistLounge,ChatGPT,artificial,singularity,Futurology"
 )
 
 # Who is running this copy of the script. This lives in a local, git-ignored file
@@ -42,6 +43,17 @@ else:
         f"Missing {ROLE_FILE}. Create it and put 'me' or 'partner' inside "
         f"(whichever role this machine handles) before running the pipeline."
     )
+
+# Individual hardware configuration
+if WHO_AM_I == "me":
+    # Your powerful laptop (32GB RAM, 14 cores)
+    MAX_CONCURRENT_FILES = 6
+    CHUNK_SIZE_STR = "500000"
+else:
+    # Partner's laptop (16GB RAM, unknown CPU)
+    # 250,000 requires ~2GB per thread, 3 threads will take a safe 6GB of RAM
+    MAX_CONCURRENT_FILES = 3
+    CHUNK_SIZE_STR = "250000"
 
 MONTHS_BY_PERSON = {
     "me": ["2023-11", "2024-04", "2024-11"],
@@ -68,13 +80,16 @@ log = logging.getLogger("pipeline")
 
 # ================== STATE (so the script can be restarted without losing progress) ==================
 
+state_lock = threading.Lock()
+
 def load_state():
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
     return {"processed": []}
 
 def save_state(state):
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    with state_lock:
+        STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 # ================== FILE / DISK HELPERS ==================
 
@@ -136,23 +151,24 @@ def process_own_file(filename, state):
     # so we point the extractor at the correct subfolder and narrow it to this one file
     escaped_name = re.escape(filename)
     command = [
-        "python", str(EXTRACTOR_SCRIPT),
+        sys.executable, str(EXTRACTOR_SCRIPT),
         str(folder),
         "--output_dir", str(OUTPUT_DIR),
         "--format", "csv",
         "--field", "subreddit",
         "--value", SUBREDDITS,
+        "--chunk_size", CHUNK_SIZE_STR,
         "--file_filter", f"^{escaped_name}$",
     ]
 
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=6 * 3600)
+        result = subprocess.run(command, timeout=6 * 3600, creationflags=subprocess.CREATE_NEW_CONSOLE)
     except subprocess.TimeoutExpired:
         log.error(f"{filename}: timed out after 6h, will retry next cycle")
         return False
 
     if result.returncode != 0:
-        log.error(f"{filename}: extraction failed:\n{result.stderr}")
+        log.error(f"{filename}: extraction failed with code {result.returncode}. Check its separate console window for details.")
         return False
 
     log.info(f"Successfully processed: {filename}")
@@ -199,18 +215,54 @@ def merge_final_dataset():
     if len(existing) != len(csv_files):
         missing = set(csv_files) - set(existing)
         log.warning(f"Missing {len(missing)} CSV files for the final merge: {missing}")
+        # Comment out the return below if you want to merge currently available files 
+        # without waiting for the entire dataset to finish downloading/extracting.
         return
 
     log.info(f"Merging final dataset from {len(existing)} files...")
+    
+    # Keywords for lexical filtering (AI Anxiety focus)
+    keywords = "ai|artificial intelligence|chatgpt|openai|claude|gpt|replaced|obsolete|layoff|automate|useless|takeover"
+    
+    # Core columns needed for analysis (discarding irrelevant metadata)
+    columns_to_keep = ['id', 'created_utc', 'subreddit', 'author', 'score', 'body', 'title', 'selftext']
+
     dfs = []
     for f in existing:
         try:
-            dfs.append(pd.read_csv(f))
+            log.info(f"Processing and filtering {f.name}...")
+            
+            # Read the extracted CSV file
+            df = pd.read_csv(f, low_memory=False)
+            
+            # Keep only the required columns (ignoring those missing in the current file)
+            cols = [c for c in columns_to_keep if c in df.columns]
+            df = df[cols]
+            
+            # Determine which text columns are present 
+            # ('body' for comments; 'title' and 'selftext' for submissions)
+            text_columns = [c for c in ['body', 'title', 'selftext'] if c in df.columns]
+            
+            # Fill NaN values to prevent .str.contains() from throwing errors
+            for col in text_columns:
+                df[col] = df[col].fillna('')
+                
+            # Create a boolean mask: look for keywords in at least one of the text columns
+            mask = pd.Series(False, index=df.index)
+            for col in text_columns:
+                mask = mask | df[col].str.contains(keywords, case=False, regex=True)
+                
+            # Apply the mask to filter the dataframe
+            filtered_df = df[mask]
+            
+            log.info(f"Kept {len(filtered_df)} rows out of {len(df)} in {f.name}")
+            dfs.append(filtered_df)
+            
         except Exception as e:
-            log.error(f"Could not read {f}: {e}")
+            log.error(f"Could not read/process {f}: {e}")
 
     if not dfs:
-        log.error("No CSV could be read, final file not created.")
+        log.error("No CSV could be read or matched keywords, final file not created.")
         return
 
     final_df = pd.concat(dfs, ignore_index=True)
@@ -231,22 +283,32 @@ def main():
         kind = "own (raw .zst)" if is_own_file(f) else "teammate's (finished CSV)"
         log.info(f"  - {f}  [{kind}]")
 
-    while True:
-        all_done = True
-        for filename in TARGET_FILES:
-            if filename in state["processed"]:
-                continue
-            ok = process_file(filename, state)
-            if not ok:
-                all_done = False
+    active_futures = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_FILES) as executor:
+        while True:
+            finished_tasks = [fname for fname, fut in active_futures.items() if fut.done()]
+            for fname in finished_tasks:
+                del active_futures[fname]
 
-        if all_done:
-            log.info("All 12 files accounted for.")
-            merge_final_dataset()
-            break
+            all_done = True
+            for filename in TARGET_FILES:
+                if filename not in state["processed"]:
+                    all_done = False
+                    
+                    if is_own_file(filename):
+                        src_path = source_dir(filename) / filename
+                        if is_fully_downloaded(src_path) and free_space_gb() >= MIN_FREE_GB:
+                            if filename not in active_futures:
+                                active_futures[filename] = executor.submit(process_own_file, filename, state)
+                    else:
+                        process_teammate_file(filename, state)
 
-        log.info(f"Waiting {POLL_INTERVAL_SEC}s before the next check...")
-        time.sleep(POLL_INTERVAL_SEC)
+            if all_done and not active_futures:
+                log.info("All 12 files accounted for.")
+                merge_final_dataset()
+                break
+
+            time.sleep(60)
 
 if __name__ == "__main__":
     main()
