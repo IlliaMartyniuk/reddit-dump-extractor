@@ -30,9 +30,18 @@ SUBREDDITS = (
     "Anthropic,artificial,singularity,Futurology,technology"
 )
 
-# Who is running this copy of the script. On a fork, a teammate just flips this
-# one line to "partner" and everything else (paths, roles, waiting logic) follows.
-WHO_AM_I = "me"  # "me" or "partner"
+# Who is running this copy of the script. This lives in a local, git-ignored file
+# (not in this source file) so that two collaborators pushing to the same repo
+# never overwrite each other's role. To set your role, create role.local.txt next
+# to this script containing just "me" or "partner" (no quotes, no newline needed).
+ROLE_FILE = BASE_DIR / "role.local.txt"
+if ROLE_FILE.exists():
+    WHO_AM_I = ROLE_FILE.read_text(encoding="utf-8").strip()
+else:
+    raise SystemExit(
+        f"Missing {ROLE_FILE}. Create it and put 'me' or 'partner' inside "
+        f"(whichever role this machine handles) before running the pipeline."
+    )
 
 MONTHS_BY_PERSON = {
     "me": ["2023-11", "2024-04", "2024-11"],
