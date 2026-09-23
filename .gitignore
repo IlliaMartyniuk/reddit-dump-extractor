@@ -2,3 +2,6 @@ input
 output
 logs
 venv
+data/
+*.zst
+*.csv
