@@ -12,7 +12,7 @@
     "log_format": "%(asctime)s - %(levelname)s: %(message)s"
   },
   "processing": {
-    "progress_log_interval": 5000000
+    "progress_log_interval": 500000
   },
   "file_filtering": {
     "default_file_filter": "^RC_|^RS_",
@@ -40,8 +40,8 @@
     ]
   },
   "defaults": {
-    "field": "subreddit",
-    "value": "ukraine",
-    "regex": false
+  "field": "subreddit",
+  "value": "cscareerquestions,webdev,ITCareerQuestions,learnprogramming,DataScience,jobs,careerguidance,recruitinghell,resumes,copywriting,graphic_design,freelance,translation,Journalism,ArtistLounge,ChatGPT,OpenAI,Claude,Anthropic,artificial,singularity,Futurology,technology",
+  "regex": false
   }
 }
