@@ -11,3 +11,5 @@ pipeline_state.json
 __pycache__/
 .vscode/
 pipeline_state_backup.json
+.env
+*pdf

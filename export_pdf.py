@@ -7,7 +7,7 @@ from nbconvert.writers import FilesWriter
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-notebook_name = "eda1.ipynb"
+notebook_name = "test.ipynb"
 
 exporter = WebPDFExporter()
 exporter.allow_chromium_download = True
